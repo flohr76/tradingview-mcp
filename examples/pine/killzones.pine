@@ -1,35 +1,55 @@
 //@version=6
 // ============================================================================
-//  KILLZONES [Claude] — Asie / Londres / New York AM + sweep du range asiatique
-//  D'apres le PDF "Killing zone 1" (coaching 1to1).
+//  KILLZONES [Claude] v2 — Asie / Londres / New York AM
+//  + balayage (sweep) du range asiatique et recuperation.
 //
-//  Horaires ancres en UTC -> fixes toute l'annee (Tahiti n'a pas d'heure d'ete).
-//  Equivalent heure Tahiti (UTC-10) :
-//     Asie        01:00-05:00 UTC  ->  15:00-19:00 (la veille)
-//     Londres     07:00-10:00 UTC  ->  21:00-00:00 (la veille)
-//     New York AM 12:00-15:00 UTC  ->  02:00-05:00
+//  Les killzones sont definies en HEURE DE NEW YORK (reference ICT) :
+//     Range / killzone asiatique   20:00 - 00:00  ET
+//     Killzone de Londres          02:00 - 05:00  ET
+//     Killzone de New York AM      08:30 - 11:30  ET
 //
-//  Si ton coach parlait en GMT (et non en heure de Paris), ajoute +1h a chaque
-//  session ci-dessous : 0200-0600 / 0800-1100 / 1300-1600.
+//  En ancrant sur "America/New_York", Pine gere seul l'heure d'ete / d'hiver :
+//  les horaires restent corrects toute l'annee. Vus depuis un fuseau sans DST
+//  (Tahiti, UTC-10), ils se decalent d'1h en mars et en novembre — c'est normal,
+//  c'est le marche qui bouge, pas l'indicateur :
+//     ETE (EDT)    Asie 14:00-18:00  Londres 20:00-23:00  NY AM 02:30-05:30
+//     HIVER (EST)  Asie 15:00-19:00  Londres 21:00-00:00  NY AM 03:30-06:30
+//
+//  Note : si "2000-0000" est refuse par ton build, utiliser "2000-2359".
 // ============================================================================
 indicator("Killzones [Claude]", "Killzones", overlay = true,
-     max_lines_count = 60, max_labels_count = 60)
+     max_lines_count = 500, max_labels_count = 500)
 
-// ---------------------------- Sessions (UTC) --------------------------------
-grpS = "Killzones (heures UTC)"
-showAsia = input.bool(true,          "Asie",        inline = "a", group = grpS)
-sesAsia  = input.session("0100-0500", "",           inline = "a", group = grpS)
-showLdn  = input.bool(true,          "Londres",     inline = "b", group = grpS)
-sesLdn   = input.session("0700-1000", "",           inline = "b", group = grpS)
-showNy   = input.bool(true,          "New York AM", inline = "c", group = grpS)
-sesNy    = input.session("1200-1500", "",           inline = "c", group = grpS)
-sesDays  = input.string("1234567",   "Jours actifs (1=dim ... 7=sam)", group = grpS)
+// ---------------------------- Fuseau + sessions -----------------------------
+grpS = "Killzones"
+tz = input.string("America/New_York", "Fuseau des horaires",
+     options = ["America/New_York", "Europe/London", "Europe/Paris", "Pacific/Tahiti", "UTC"],
+     group = grpS,
+     tooltip = "Les horaires ci-dessous sont interpretes dans ce fuseau. " +
+       "America/New_York = reference ICT, changement d'heure gere automatiquement.")
+
+showAsia = input.bool(true,           "Asie",        inline = "a", group = grpS)
+sesAsia  = input.session("2000-0000", "",            inline = "a", group = grpS)
+showLdn  = input.bool(true,           "Londres",     inline = "b", group = grpS)
+sesLdn   = input.session("0200-0500", "",            inline = "b", group = grpS)
+showNy   = input.bool(true,           "New York AM", inline = "c", group = grpS)
+sesNy    = input.session("0830-1130", "",            inline = "c", group = grpS)
+sesDays  = input.string("1234567",    "Jours actifs (1=dim ... 7=sam)", group = grpS,
+     tooltip = "Filtre les jours ou la session est prise en compte. " +
+       "Le jour est celui du DEBUT de session dans le fuseau choisi.")
 
 // ---------------------------- Range asiatique -------------------------------
 grpA = "Range asiatique"
-showRange = input.bool(true,  "Tracer le high / low de l'Asie",     group = grpA)
-showSweep = input.bool(true,  "Marquer les sweeps pendant Londres", group = grpA)
+showRange = input.bool(true,  "Tracer le high / low de l'Asie",      group = grpA)
+showSweep = input.bool(true,  "Marquer les sweeps",                  group = grpA)
 extendNy  = input.bool(true,  "Prolonger les niveaux jusqu'a NY AM", group = grpA)
+sweepNy   = input.bool(false, "Detecter aussi les sweeps en NY AM",  group = grpA)
+maxBars   = input.int(0, "Barres max entre le balayage et la recuperation (0 = illimite)",
+     minval = 0, group = grpA,
+     tooltip = "0 : la recuperation peut arriver n'importe quand dans la killzone. " +
+       "Mettre 3-6 pour n'accepter qu'un retournement rapide.")
+minTicks  = input.int(0, "Amplitude minimale du range (en ticks, 0 = desactive)",
+     minval = 0, group = grpA)
 
 // ---------------------------- Style -----------------------------------------
 grpC = "Couleurs"
@@ -40,29 +60,48 @@ colHi   = input.color(#EF5350, "Niveau haut", inline = "e", group = grpC)
 colLo   = input.color(#26A69A, "Niveau bas",  inline = "e", group = grpC)
 bgAlpha = input.int(92, "Transparence du fond", minval = 70, maxval = 99, group = grpC)
 
-// ---------------------------- Detection sessions ----------------------------
-f_in(string ses) =>
-    not na(time(timeframe.period, ses + ":" + sesDays, "UTC"))
+// ---------------------------- Garde-fou timeframe ---------------------------
+// Au-dela de 1H une bougie chevauche plusieurs sessions : time(...) renvoie
+// "dans la session" pour toutes, le range et les fonds deviennent faux.
+tfOk = timeframe.isintraday and timeframe.in_seconds() <= 3600
+if barstate.islast and not tfOk
+    label.new(bar_index, high, "Killzones : timeframe intraday <= 1H requis",
+         style = label.style_label_down, color = color.new(color.red, 10),
+         textcolor = color.white, size = size.normal)
 
-inAsia = showAsia and f_in(sesAsia)
-inLdn  = showLdn  and f_in(sesLdn)
-inNy   = showNy   and f_in(sesNy)
+// ---------------------------- Detection des sessions ------------------------
+f_in(simple string ses) =>
+    tfOk and not na(time(timeframe.period, ses + ":" + sesDays, tz))
 
-bgcolor(inAsia ? color.new(colAsia, bgAlpha) : na, title = "KZ Asie")
-bgcolor(inLdn  ? color.new(colLdn,  bgAlpha) : na, title = "KZ Londres")
-bgcolor(inNy   ? color.new(colNy,   bgAlpha) : na, title = "KZ New York AM")
+// Volontairement independant des cases "afficher" : masquer un fond ne doit
+// pas desactiver le calcul du range ni la detection des sweeps.
+inAsia = f_in(sesAsia)
+inLdn  = f_in(sesLdn)
+inNy   = f_in(sesNy)
 
-// ---------------------------- Range de l'Asie -------------------------------
-var float asiaH    = na
-var float asiaL    = na
-var int   asiaBar  = na
-var line  lnH      = na
-var line  lnL      = na
-var label lbH      = na
-var label lbL      = na
-var bool  sweptH   = false
-var bool  sweptL   = false
+bgcolor(showAsia and inAsia ? color.new(colAsia, bgAlpha) : na, title = "KZ Asie")
+bgcolor(showLdn  and inLdn  ? color.new(colLdn,  bgAlpha) : na, title = "KZ Londres")
+bgcolor(showNy   and inNy   ? color.new(colNy,   bgAlpha) : na, title = "KZ New York AM")
 
+// ---------------------------- Etat du range ---------------------------------
+var float asiaH     = na
+var float asiaL     = na
+var int   asiaBar   = na
+var int   rangeDay  = na      // jour (fuseau tz) auquel le range est rattache
+var line  lnH       = na
+var line  lnL       = na
+var label lbH       = na
+var label lbL       = na
+var bool  brokeH    = false   // niveau depasse (arrete la prolongation)
+var bool  brokeL    = false
+var bool  armedH    = false   // depasse PENDANT la fenetre -> recuperation armee
+var bool  armedL    = false
+var int   brokeHBar = na
+var int   brokeLBar = na
+var bool  doneH     = false   // signal deja emis pour ce range
+var bool  doneL     = false
+
+dayId     = year(time, tz) * 1000 + dayofyear(time, tz)
 startAsia = inAsia and not inAsia[1]
 endAsia   = not inAsia and inAsia[1]
 
@@ -70,49 +109,86 @@ if startAsia
     asiaH   := high
     asiaL   := low
     asiaBar := bar_index
+    brokeH  := false
+    brokeL  := false
+    armedH  := false
+    armedL  := false
+    doneH   := false
+    doneL   := false
 else if inAsia
     asiaH := math.max(asiaH, high)
     asiaL := math.min(asiaL, low)
 
-// A la fin de l'Asie : on trace les 2 niveaux a sweeper
-if endAsia and showRange and not na(asiaH)
-    lnH := line.new(asiaBar, asiaH, bar_index, asiaH, color = colHi, width = 1, style = line.style_dashed)
-    lnL := line.new(asiaBar, asiaL, bar_index, asiaL, color = colLo, width = 1, style = line.style_dashed)
-    lbH := label.new(bar_index, asiaH, "Asie H", style = label.style_none, textcolor = color.new(colHi, 25), size = size.tiny)
-    lbL := label.new(bar_index, asiaL, "Asie L", style = label.style_none, textcolor = color.new(colLo, 25), size = size.tiny)
-    sweptH := false
-    sweptL := false
+// Fin de l'Asie : les deux niveaux a sweeper sont figes.
+if endAsia and not na(asiaH)
+    rangeDay := dayId
+    if showRange
+        lnH := line.new(asiaBar, asiaH, bar_index, asiaH, color = colHi, width = 1, style = line.style_dashed)
+        lnL := line.new(asiaBar, asiaL, bar_index, asiaL, color = colLo, width = 1, style = line.style_dashed)
+        lbH := label.new(bar_index, asiaH, "Asie H", style = label.style_none,
+             textcolor = color.new(colHi, 25), size = size.tiny)
+        lbL := label.new(bar_index, asiaL, "Asie L", style = label.style_none,
+             textcolor = color.new(colLo, 25), size = size.tiny)
 
-// Prolongation des niveaux tant qu'ils ne sont pas balayes
-keepExt = inLdn or (extendNy and inNy)
-if keepExt
-    if not na(lnH) and not sweptH
-        line.set_x2(lnH, bar_index)
-        label.set_x(lbH, bar_index)
-    if not na(lnL) and not sweptL
-        line.set_x2(lnL, bar_index)
-        label.set_x(lbL, bar_index)
+// Le range n'est exploitable que le jour qui suit l'Asie, et hors session
+// asiatique : evite de trader un range perime (jour ferie, symbole sans bougies
+// la nuit) ou un range encore en cours de formation.
+bigEnough = minTicks == 0 or (asiaH - asiaL) >= minTicks * syminfo.mintick
+rangeOk   = not na(asiaH) and rangeDay == dayId and not inAsia and bigEnough
 
-// ---------------------------- Sweeps pendant Londres ------------------------
+// ---------------------------- Fenetres --------------------------------------
+keepExt = inLdn or (extendNy and inNy)     // prolongation visuelle des niveaux
+sweepIn = inLdn or (sweepNy and inNy)      // fenetre de detection des sweeps
+
+// ---------------------------- Balayage + recuperation -----------------------
 bool sweepLow  = false
 bool sweepHigh = false
 
-if inLdn and barstate.isconfirmed and not na(asiaL) and not sweptL and low < asiaL and close > asiaL
-    sweptL   := true
-    sweepLow := true
-    if showSweep
-        label.new(bar_index, low, "Sweep LOW", style = label.style_label_up,
-             color = color.new(colLo, 15), textcolor = color.white, size = size.small)
+if rangeOk and barstate.isconfirmed
+    // 1) le niveau est pris (meche au-dela). Memorise quand, et si on etait
+    //    dans la killzone a ce moment-la.
+    if not brokeH and high > asiaH
+        brokeH    := true
+        armedH    := sweepIn
+        brokeHBar := bar_index
+    if not brokeL and low < asiaL
+        brokeL    := true
+        armedL    := sweepIn
+        brokeLBar := bar_index
+    // 2) recuperation : une cloture revient a l'interieur du range.
+    //    Peut arriver sur la meme bougie que le balayage ou plusieurs bougies
+    //    plus tard — c'est la difference majeure avec la v1.
+    delayOkH = maxBars == 0 or bar_index - brokeHBar <= maxBars
+    delayOkL = maxBars == 0 or bar_index - brokeLBar <= maxBars
+    if sweepIn and armedH and not doneH and close < asiaH and delayOkH
+        doneH     := true
+        sweepHigh := true
+    if sweepIn and armedL and not doneL and close > asiaL and delayOkL
+        doneL    := true
+        sweepLow := true
 
-if inLdn and barstate.isconfirmed and not na(asiaH) and not sweptH and high > asiaH and close < asiaH
-    sweptH    := true
-    sweepHigh := true
-    if showSweep
-        label.new(bar_index, high, "Sweep HIGH", style = label.style_label_down,
-             color = color.new(colHi, 15), textcolor = color.white, size = size.small)
+if sweepHigh and showSweep
+    label.new(bar_index, high, "Sweep HIGH", style = label.style_label_down,
+         color = color.new(colHi, 15), textcolor = color.white, size = size.small)
+if sweepLow and showSweep
+    label.new(bar_index, low, "Sweep LOW", style = label.style_label_up,
+         color = color.new(colLo, 15), textcolor = color.white, size = size.small)
+
+// ---------------------------- Prolongation des niveaux ----------------------
+if keepExt and rangeOk
+    if not na(lnH) and not brokeH
+        line.set_x2(lnH, bar_index)
+        label.set_x(lbH, bar_index)
+    if not na(lnL) and not brokeL
+        line.set_x2(lnL, bar_index)
+        label.set_x(lbL, bar_index)
 
 // ---------------------------- Alertes ---------------------------------------
-alertcondition(sweepLow,  "Sweep du LOW asiatique",  "Killzone Londres : low de l'Asie balaye puis recupere -> biais HAUSSIER")
-alertcondition(sweepHigh, "Sweep du HIGH asiatique", "Killzone Londres : high de l'Asie balaye puis rejete -> biais BAISSIER")
-alertcondition(inLdn and not inLdn[1], "Ouverture Killzone Londres", "Killzone de Londres ouverte")
-alertcondition(inNy  and not inNy[1],  "Ouverture Killzone New York AM", "Killzone de New York AM ouverte")
+alertcondition(sweepLow,  "Sweep du LOW asiatique",
+     "Killzone : low de l'Asie balaye puis recupere -> biais HAUSSIER")
+alertcondition(sweepHigh, "Sweep du HIGH asiatique",
+     "Killzone : high de l'Asie balaye puis rejete -> biais BAISSIER")
+alertcondition(inLdn and not inLdn[1], "Ouverture Killzone Londres",
+     "Killzone de Londres ouverte")
+alertcondition(inNy  and not inNy[1],  "Ouverture Killzone New York AM",
+     "Killzone de New York AM ouverte")
