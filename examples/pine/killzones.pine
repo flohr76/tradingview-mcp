@@ -1,0 +1,118 @@
+//@version=6
+// ============================================================================
+//  KILLZONES [Claude] — Asie / Londres / New York AM + sweep du range asiatique
+//  D'apres le PDF "Killing zone 1" (coaching 1to1).
+//
+//  Horaires ancres en UTC -> fixes toute l'annee (Tahiti n'a pas d'heure d'ete).
+//  Equivalent heure Tahiti (UTC-10) :
+//     Asie        01:00-05:00 UTC  ->  15:00-19:00 (la veille)
+//     Londres     07:00-10:00 UTC  ->  21:00-00:00 (la veille)
+//     New York AM 12:00-15:00 UTC  ->  02:00-05:00
+//
+//  Si ton coach parlait en GMT (et non en heure de Paris), ajoute +1h a chaque
+//  session ci-dessous : 0200-0600 / 0800-1100 / 1300-1600.
+// ============================================================================
+indicator("Killzones [Claude]", "Killzones", overlay = true,
+     max_lines_count = 60, max_labels_count = 60)
+
+// ---------------------------- Sessions (UTC) --------------------------------
+grpS = "Killzones (heures UTC)"
+showAsia = input.bool(true,          "Asie",        inline = "a", group = grpS)
+sesAsia  = input.session("0100-0500", "",           inline = "a", group = grpS)
+showLdn  = input.bool(true,          "Londres",     inline = "b", group = grpS)
+sesLdn   = input.session("0700-1000", "",           inline = "b", group = grpS)
+showNy   = input.bool(true,          "New York AM", inline = "c", group = grpS)
+sesNy    = input.session("1200-1500", "",           inline = "c", group = grpS)
+sesDays  = input.string("1234567",   "Jours actifs (1=dim ... 7=sam)", group = grpS)
+
+// ---------------------------- Range asiatique -------------------------------
+grpA = "Range asiatique"
+showRange = input.bool(true,  "Tracer le high / low de l'Asie",     group = grpA)
+showSweep = input.bool(true,  "Marquer les sweeps pendant Londres", group = grpA)
+extendNy  = input.bool(true,  "Prolonger les niveaux jusqu'a NY AM", group = grpA)
+
+// ---------------------------- Style -----------------------------------------
+grpC = "Couleurs"
+colAsia = input.color(#787B86, "Asie",        inline = "d", group = grpC)
+colLdn  = input.color(#2962FF, "Londres",     inline = "d", group = grpC)
+colNy   = input.color(#FF9800, "New York AM", inline = "d", group = grpC)
+colHi   = input.color(#EF5350, "Niveau haut", inline = "e", group = grpC)
+colLo   = input.color(#26A69A, "Niveau bas",  inline = "e", group = grpC)
+bgAlpha = input.int(92, "Transparence du fond", minval = 70, maxval = 99, group = grpC)
+
+// ---------------------------- Detection sessions ----------------------------
+f_in(string ses) =>
+    not na(time(timeframe.period, ses + ":" + sesDays, "UTC"))
+
+inAsia = showAsia and f_in(sesAsia)
+inLdn  = showLdn  and f_in(sesLdn)
+inNy   = showNy   and f_in(sesNy)
+
+bgcolor(inAsia ? color.new(colAsia, bgAlpha) : na, title = "KZ Asie")
+bgcolor(inLdn  ? color.new(colLdn,  bgAlpha) : na, title = "KZ Londres")
+bgcolor(inNy   ? color.new(colNy,   bgAlpha) : na, title = "KZ New York AM")
+
+// ---------------------------- Range de l'Asie -------------------------------
+var float asiaH    = na
+var float asiaL    = na
+var int   asiaBar  = na
+var line  lnH      = na
+var line  lnL      = na
+var label lbH      = na
+var label lbL      = na
+var bool  sweptH   = false
+var bool  sweptL   = false
+
+startAsia = inAsia and not inAsia[1]
+endAsia   = not inAsia and inAsia[1]
+
+if startAsia
+    asiaH   := high
+    asiaL   := low
+    asiaBar := bar_index
+else if inAsia
+    asiaH := math.max(asiaH, high)
+    asiaL := math.min(asiaL, low)
+
+// A la fin de l'Asie : on trace les 2 niveaux a sweeper
+if endAsia and showRange and not na(asiaH)
+    lnH := line.new(asiaBar, asiaH, bar_index, asiaH, color = colHi, width = 1, style = line.style_dashed)
+    lnL := line.new(asiaBar, asiaL, bar_index, asiaL, color = colLo, width = 1, style = line.style_dashed)
+    lbH := label.new(bar_index, asiaH, "Asie H", style = label.style_none, textcolor = color.new(colHi, 25), size = size.tiny)
+    lbL := label.new(bar_index, asiaL, "Asie L", style = label.style_none, textcolor = color.new(colLo, 25), size = size.tiny)
+    sweptH := false
+    sweptL := false
+
+// Prolongation des niveaux tant qu'ils ne sont pas balayes
+keepExt = inLdn or (extendNy and inNy)
+if keepExt
+    if not na(lnH) and not sweptH
+        line.set_x2(lnH, bar_index)
+        label.set_x(lbH, bar_index)
+    if not na(lnL) and not sweptL
+        line.set_x2(lnL, bar_index)
+        label.set_x(lbL, bar_index)
+
+// ---------------------------- Sweeps pendant Londres ------------------------
+bool sweepLow  = false
+bool sweepHigh = false
+
+if inLdn and barstate.isconfirmed and not na(asiaL) and not sweptL and low < asiaL and close > asiaL
+    sweptL   := true
+    sweepLow := true
+    if showSweep
+        label.new(bar_index, low, "Sweep LOW", style = label.style_label_up,
+             color = color.new(colLo, 15), textcolor = color.white, size = size.small)
+
+if inLdn and barstate.isconfirmed and not na(asiaH) and not sweptH and high > asiaH and close < asiaH
+    sweptH    := true
+    sweepHigh := true
+    if showSweep
+        label.new(bar_index, high, "Sweep HIGH", style = label.style_label_down,
+             color = color.new(colHi, 15), textcolor = color.white, size = size.small)
+
+// ---------------------------- Alertes ---------------------------------------
+alertcondition(sweepLow,  "Sweep du LOW asiatique",  "Killzone Londres : low de l'Asie balaye puis recupere -> biais HAUSSIER")
+alertcondition(sweepHigh, "Sweep du HIGH asiatique", "Killzone Londres : high de l'Asie balaye puis rejete -> biais BAISSIER")
+alertcondition(inLdn and not inLdn[1], "Ouverture Killzone Londres", "Killzone de Londres ouverte")
+alertcondition(inNy  and not inNy[1],  "Ouverture Killzone New York AM", "Killzone de New York AM ouverte")
