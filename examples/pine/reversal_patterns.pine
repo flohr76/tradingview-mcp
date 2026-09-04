@@ -1,0 +1,222 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// Reversal Patterns — détection automatique de figures de retournement.
+//
+// Fonctionne sur n'importe quel instrument (or, forex, actions, indices) sans
+// réglage particulier : toutes les tolérances sont exprimées en multiples d'ATR
+// et jamais en points ou en pips. « Deux sommets au même niveau » a donc le même
+// sens sur XAUUSD à 2 600 $ que sur EURUSD à 1,08.
+//
+// Figures détectées :
+//   • Double Bottom / Double Top          (3 pivots)
+//   • Inverted Head & Shoulders / H&S     (5 pivots)
+//
+// Le signal est émis à la CASSURE de la neckline, comme sur les schémas
+// classiques — pas à la formation de la figure. Entry / SL / TP sont projetés
+// selon la méthode du « measured move » : la hauteur de la figure reportée
+// depuis la neckline.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("Reversal Patterns — Auto", "Reversals", overlay = true,
+     max_lines_count = 500, max_labels_count = 500)
+
+// ═══ Réglages ════════════════════════════════════════════════════════════════
+gD = "Détection"
+pivLen  = input.int(5, "Longueur de pivot", minval = 2, maxval = 50, group = gD,
+     tooltip = "Nombre de bougies de chaque côté d'un sommet ou d'un creux pour le valider. " +
+               "Plus grand = moins de signaux, mais plus fiables. 5 convient en 5 min, 3 en H1.")
+tolMult = input.float(0.5, "Tolérance sommets/creux (× ATR)", minval = 0.05, step = 0.05, group = gD,
+     tooltip = "Écart maximal admis entre deux sommets (ou deux creux) pour les considérer " +
+               "au même niveau. En ATR, donc valable sur tous les instruments.")
+atrLen  = input.int(14, "Longueur ATR", minval = 1, group = gD)
+slBuf   = input.float(0.25, "Marge du stop (× ATR)", minval = 0.0, step = 0.05, group = gD,
+     tooltip = "Distance ajoutée au-delà du point extrême pour placer le stop.")
+
+gP = "Figures"
+useDouble = input.bool(true, "Double Top / Double Bottom", group = gP)
+useHS     = input.bool(true, "Head & Shoulders / inversé",  group = gP)
+
+gV = "Affichage"
+showLevels = input.bool(true, "Tracer Entry / SL / TP", group = gV)
+showPivots = input.bool(false, "Marquer les pivots détectés", group = gV)
+projLen    = input.int(30, "Longueur des projections (bougies)", minval = 5, group = gV)
+colBull    = input.color(#26a69a, "Haussier", group = gV)
+colBear    = input.color(#ef5350, "Baissier", group = gV)
+
+// ═══ Collecte des pivots ═════════════════════════════════════════════════════
+atrV = ta.atr(atrLen)
+tol  = atrV * tolMult
+
+var array<float> pPrice = array.new_float()
+var array<int>   pBar   = array.new_int()
+var array<bool>  pIsHi  = array.new_bool()
+
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+
+// Un pivot confirmé sur la bougie courante s'est produit pivLen bougies plus tôt.
+if not na(ph)
+    array.push(pPrice, ph)
+    array.push(pBar,   bar_index - pivLen)
+    array.push(pIsHi,  true)
+    if showPivots
+        label.new(bar_index - pivLen, ph, "H", style = label.style_label_down,
+             color = color.new(colBear, 60), textcolor = color.white, size = size.tiny)
+
+if not na(pl)
+    array.push(pPrice, pl)
+    array.push(pBar,   bar_index - pivLen)
+    array.push(pIsHi,  false)
+    if showPivots
+        label.new(bar_index - pivLen, pl, "L", style = label.style_label_up,
+             color = color.new(colBull, 60), textcolor = color.white, size = size.tiny)
+
+// On ne garde qu'une fenêtre glissante : les figures visées tiennent en 5 pivots.
+while array.size(pPrice) > 12
+    array.shift(pPrice)
+    array.shift(pBar)
+    array.shift(pIsHi)
+
+newPivot = not na(ph) or not na(pl)
+
+// Accès « depuis la fin » : 0 = pivot le plus récent, 1 = le précédent, etc.
+gPx(int i) => array.get(pPrice, array.size(pPrice) - 1 - i)
+gBr(int i) => array.get(pBar,   array.size(pBar)   - 1 - i)
+gHi(int i) => array.get(pIsHi,  array.size(pIsHi)  - 1 - i)
+
+// ═══ Armement des figures ════════════════════════════════════════════════════
+// Une figure est « armée » dès que sa forme est reconnue, puis confirmée plus
+// tard par la cassure de la neckline. Les tests de cassure (ta.crossover /
+// ta.crossunder) doivent être évalués à CHAQUE bougie pour garder un état
+// correct — ils sont donc placés hors des blocs conditionnels.
+
+var bool  dbOn   = false
+var float dbNeck = na
+var float dbStop = na
+var float dbTgt  = na
+var int   dbFrom = na
+
+var bool  dtOn   = false
+var float dtNeck = na
+var float dtStop = na
+var float dtTgt  = na
+var int   dtFrom = na
+
+var bool  ihOn   = false
+var float ihNeck = na
+var float ihStop = na
+var float ihTgt  = na
+var int   ihFrom = na
+
+var bool  hsOn   = false
+var float hsNeck = na
+var float hsStop = na
+var float hsTgt  = na
+var int   hsFrom = na
+
+// ── Double Bottom : creux, sommet, creux ─────────────────────────────────────
+if useDouble and newPivot and array.size(pPrice) >= 3
+    if not gHi(2) and gHi(1) and not gHi(0)
+        lo2 = gPx(2)
+        nk  = gPx(1)
+        lo0 = gPx(0)
+        // Les deux creux au même niveau, et un sommet franc entre les deux.
+        if math.abs(lo2 - lo0) <= tol and nk - math.max(lo2, lo0) > tol
+            base   = math.min(lo2, lo0)
+            dbOn   := true
+            dbNeck := nk
+            dbStop := base - atrV * slBuf
+            dbTgt  := nk + (nk - base)
+            dbFrom := gBr(2)
+
+// ── Double Top : sommet, creux, sommet ───────────────────────────────────────
+if useDouble and newPivot and array.size(pPrice) >= 3
+    if gHi(2) and not gHi(1) and gHi(0)
+        hi2 = gPx(2)
+        nk  = gPx(1)
+        hi0 = gPx(0)
+        if math.abs(hi2 - hi0) <= tol and math.min(hi2, hi0) - nk > tol
+            peak   = math.max(hi2, hi0)
+            dtOn   := true
+            dtNeck := nk
+            dtStop := peak + atrV * slBuf
+            dtTgt  := nk - (peak - nk)
+            dtFrom := gBr(2)
+
+// ── Inverted Head & Shoulders : creux, sommet, creux(tête), sommet, creux ────
+if useHS and newPivot and array.size(pPrice) >= 5
+    if not gHi(4) and gHi(3) and not gHi(2) and gHi(1) and not gHi(0)
+        ls = gPx(4)
+        t1 = gPx(3)
+        hd = gPx(2)
+        t2 = gPx(1)
+        rs = gPx(0)
+        // Tête nettement plus basse que les épaules, épaules à peu près au même niveau.
+        if math.min(ls, rs) - hd > tol and math.abs(ls - rs) <= tol
+            nk     = math.avg(t1, t2)
+            ihOn   := true
+            ihNeck := nk
+            ihStop := hd - atrV * slBuf
+            ihTgt  := nk + (nk - hd)
+            ihFrom := gBr(4)
+
+// ── Head & Shoulders : sommet, creux, sommet(tête), creux, sommet ────────────
+if useHS and newPivot and array.size(pPrice) >= 5
+    if gHi(4) and not gHi(3) and gHi(2) and not gHi(1) and gHi(0)
+        ls = gPx(4)
+        t1 = gPx(3)
+        hd = gPx(2)
+        t2 = gPx(1)
+        rs = gPx(0)
+        if hd - math.max(ls, rs) > tol and math.abs(ls - rs) <= tol
+            nk     = math.avg(t1, t2)
+            hsOn   := true
+            hsNeck := nk
+            hsStop := hd + atrV * slBuf
+            hsTgt  := nk - (hd - nk)
+            hsFrom := gBr(4)
+
+// ═══ Confirmation : cassure de la neckline ═══════════════════════════════════
+// Évalué sur chaque bougie, sans condition, pour que l'état des croisements
+// reste juste.
+dbBreak = dbOn and ta.crossover(close,  dbNeck)
+dtBreak = dtOn and ta.crossunder(close, dtNeck)
+ihBreak = ihOn and ta.crossover(close,  ihNeck)
+hsBreak = hsOn and ta.crossunder(close, hsNeck)
+
+// ═══ Tracé ═══════════════════════════════════════════════════════════════════
+draw(string name, int fromBar, float neck, float stopLvl, float tgt, color c, bool up) =>
+    line.new(fromBar, neck, bar_index, neck, color = c, style = line.style_dashed, width = 2)
+    label.new(bar_index, up ? low : high, name,
+         style     = up ? label.style_label_up : label.style_label_down,
+         color     = c, textcolor = color.white, size = size.small)
+    if showLevels
+        line.new(bar_index, neck,    bar_index + projLen, neck,    color = color.gray, style = line.style_dotted)
+        line.new(bar_index, stopLvl, bar_index + projLen, stopLvl, color = colBear,    style = line.style_dotted)
+        line.new(bar_index, tgt,     bar_index + projLen, tgt,     color = colBull,    style = line.style_dotted)
+        label.new(bar_index + projLen, neck,    "ENTRY", style = label.style_none, textcolor = color.gray, size = size.tiny)
+        label.new(bar_index + projLen, stopLvl, "SL",    style = label.style_none, textcolor = colBear,    size = size.tiny)
+        label.new(bar_index + projLen, tgt,     "TP",    style = label.style_none, textcolor = colBull,    size = size.tiny)
+
+if dbBreak
+    draw("Double Bottom", dbFrom, dbNeck, dbStop, dbTgt, colBull, true)
+    dbOn := false
+
+if dtBreak
+    draw("Double Top", dtFrom, dtNeck, dtStop, dtTgt, colBear, false)
+    dtOn := false
+
+if ihBreak
+    draw("Inverted H&S", ihFrom, ihNeck, ihStop, ihTgt, colBull, true)
+    ihOn := false
+
+if hsBreak
+    draw("Head & Shoulders", hsFrom, hsNeck, hsStop, hsTgt, colBear, false)
+    hsOn := false
+
+// ═══ Alertes ═════════════════════════════════════════════════════════════════
+alertcondition(dbBreak, "Double Bottom",    "Double Bottom confirmé — neckline cassée")
+alertcondition(dtBreak, "Double Top",       "Double Top confirmé — neckline cassée")
+alertcondition(ihBreak, "Inverted H&S",     "Inverted Head & Shoulders confirmé — neckline cassée")
+alertcondition(hsBreak, "Head & Shoulders", "Head & Shoulders confirmé — neckline cassée")
+alertcondition(dbBreak or dtBreak or ihBreak or hsBreak, "Toute figure",
+     "Figure de retournement confirmée sur {{ticker}} {{interval}}")
