@@ -117,7 +117,10 @@ scripts\launch_tv_debug.bat
 
 ### 3. Add to Claude Code
 
-Add to your Claude Code MCP config (`~/.claude/.mcp.json` or project `.mcp.json`):
+This repo ships a project-level `.mcp.json`, so if you run Claude Code **from the
+project directory** there is nothing to configure — the server is picked up on start.
+
+To use it from anywhere instead, add it to your global config (`~/.claude/.mcp.json`):
 
 ```json
 {
@@ -130,7 +133,8 @@ Add to your Claude Code MCP config (`~/.claude/.mcp.json` or project `.mcp.json`
 }
 ```
 
-Replace `/path/to/tradingview-mcp` with your actual path.
+Replace `/path/to/tradingview-mcp` with your actual path. The global config needs an
+absolute path; the bundled project config does not.
 
 ### 4. Verify
 

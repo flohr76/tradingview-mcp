@@ -14,7 +14,12 @@ If the user specifies a different install path, use that instead of `~/tradingvi
 
 ## Step 2: Add to MCP Config
 
-Add the server to the user's Claude Code MCP configuration. The config file is at `~/.claude/.mcp.json` (global) or `.mcp.json` (project-level).
+The repo already contains a project-level `.mcp.json` using a relative path, so if the
+user runs Claude Code from the install directory, **skip this step** — the server loads
+automatically. Verify with `cat .mcp.json`.
+
+Only configure a global entry if the user wants the server available from any directory.
+The global config file is `~/.claude/.mcp.json` and requires an absolute path.
 
 ```json
 {
