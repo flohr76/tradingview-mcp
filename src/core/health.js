@@ -6,39 +6,73 @@ import { existsSync, cpSync, rmSync, readdirSync } from 'fs';
 import { execSync, spawn } from 'child_process';
 import { dirname, basename, join } from 'path';
 
-// Best-effort git-pull update check: compare local HEAD to origin's default
-// branch on GitHub. Never throws — returns null on any failure (offline,
-// detached HEAD, not a git checkout) so it can't break the health check.
+// Best-effort git update check: compare local HEAD to origin's default branch
+// on GitHub. Never throws — returns null on any failure (offline, detached
+// HEAD, not a git checkout) so it can't break the health check.
 let _updateCache = null;
-async function checkForUpdate() {
-  if (_updateCache && (Date.now() - _updateCache.at) < 3600_000) return _updateCache.value;
+
+// The remote sha arrives over the network and is interpolated into git commands
+// below, so it must match the exact 40-hex shape before reaching a shell.
+const SHA_RE = /^[0-9a-f]{40}$/;
+
+// Resolve the default branch's HEAD sha from GitHub. Never rejects — null on failure.
+function fetchRemoteSha(repo) {
+  return import('https').then((http) => new Promise((resolve) => {
+    const req = http.get({
+      host: 'api.github.com', path: `/repos/${repo}/commits/HEAD`,
+      headers: { 'User-Agent': 'tradingview-mcp', Accept: 'application/vnd.github.sha' },
+    }, (res) => { let d = ''; res.on('data', (c) => d += c); res.on('end', () => resolve(res.statusCode === 200 ? d.trim() : null)); });
+    req.on('error', () => resolve(null));
+    req.setTimeout(3000, () => { req.destroy(); resolve(null); });
+  })).catch(() => null);
+}
+
+// Is `sha` present in this checkout? Uses cat-file -t rather than the usual
+// rev-parse <sha>^{commit}: on Windows execSync runs through cmd.exe, where ^
+// is the escape character and would silently mangle the argument.
+function hasCommit(git, sha) {
+  try { return git(`cat-file -t ${sha}`) === 'commit'; } catch { return false; }
+}
+
+// Does `descendant` already contain `ancestor`? --is-ancestor exits 1 when not,
+// which execSync surfaces as a throw.
+function isAncestor(git, ancestor, descendant) {
+  try { git(`merge-base --is-ancestor ${ancestor} ${descendant}`); return true; } catch { return false; }
+}
+
+export async function checkForUpdate({ _deps } = {}) {
+  // Tests pass _deps and must not see (or poison) the process-wide cache.
+  if (!_deps && _updateCache && (Date.now() - _updateCache.at) < 3600_000) return _updateCache.value;
+  const run = _deps?.execSync || execSync;
+  const remoteShaFor = _deps?.fetchRemoteSha || fetchRemoteSha;
+  const git = (args) => run(`git ${args}`, { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
   let value = null;
   try {
-    const localSha = execSync('git rev-parse HEAD', { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-    const remoteUrl = execSync('git config --get remote.origin.url', { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    const localSha = git('rev-parse HEAD');
+    const remoteUrl = git('config --get remote.origin.url');
     const m = remoteUrl.match(/github\.com[:/](.+?)(?:\.git)?$/);
     if (localSha && m) {
-      const repo = m[1];
-      const http = await import('https');
-      const remoteSha = await new Promise((resolve) => {
-        const req = http.get({
-          host: 'api.github.com', path: `/repos/${repo}/commits/HEAD`,
-          headers: { 'User-Agent': 'tradingview-mcp', Accept: 'application/vnd.github.sha' },
-        }, (res) => { let d = ''; res.on('data', (c) => d += c); res.on('end', () => resolve(res.statusCode === 200 ? d.trim() : null)); });
-        req.on('error', () => resolve(null));
-        req.setTimeout(3000, () => { req.destroy(); resolve(null); });
-      });
-      if (remoteSha) {
+      const remoteSha = await remoteShaFor(m[1]);
+      if (remoteSha && SHA_RE.test(remoteSha)) {
+        // Differing from the default branch is not the same as being behind it:
+        // a checkout on a feature branch, or carrying unpushed commits, is ahead.
+        // Reporting an update there points users at tv_update, which refuses to
+        // run off main anyway. Only flag an update when the remote commit is not
+        // already part of local history.
+        const ahead = remoteSha !== localSha
+          && hasCommit(git, remoteSha) && isAncestor(git, remoteSha, localSha);
+        const behind = remoteSha !== localSha && !ahead;
         value = {
-          update_available: remoteSha !== localSha,
+          update_available: behind,
           local_commit: localSha.slice(0, 8),
           latest_commit: remoteSha.slice(0, 8),
-          ...(remoteSha !== localSha && { hint: 'Run the tv_update tool (or `tv update` CLI) to update, then restart the MCP server.' }),
+          ...(ahead && { ahead: true }),
+          ...(behind && { hint: 'Run the tv_update tool (or \`tv update\` CLI) to update, then restart the MCP server.' }),
         };
       }
     }
   } catch { /* best-effort */ }
-  _updateCache = { at: Date.now(), value };
+  if (!_deps) _updateCache = { at: Date.now(), value };
   return value;
 }
 
