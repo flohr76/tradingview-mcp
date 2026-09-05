@@ -15,6 +15,12 @@
 // classiques — pas à la formation de la figure. Entry / SL / TP sont projetés
 // selon la méthode du « measured move » : la hauteur de la figure reportée
 // depuis la neckline.
+//
+// Une figure reconnue est « armée » puis attend sa cassure, mais pas
+// indéfiniment : elle est abandonnée si le prix franchit son point extrême
+// (la figure est détruite) ou si rien ne se passe pendant maxWait bougies.
+// Sans ces garde-fous, un double bottom vieux de trois cents bougies se
+// déclencherait au premier retour du prix sur son ancienne neckline.
 // ─────────────────────────────────────────────────────────────────────────────
 indicator("Reversal Patterns — Auto", "Reversals", overlay = true,
      max_lines_count = 500, max_labels_count = 500)
@@ -30,6 +36,10 @@ tolMult = input.float(0.5, "Tolérance sommets/creux (× ATR)", minval = 0.05, s
 atrLen  = input.int(14, "Longueur ATR", minval = 1, group = gD)
 slBuf   = input.float(0.25, "Marge du stop (× ATR)", minval = 0.0, step = 0.05, group = gD,
      tooltip = "Distance ajoutée au-delà du point extrême pour placer le stop.")
+maxWait = input.int(100, "Expiration d'une figure armée (bougies)", minval = 5, group = gD,
+     tooltip = "Une figure dont la neckline n'a toujours pas été cassée après ce nombre de " +
+               "bougies est abandonnée. Évite qu'un signal se déclenche des semaines plus tard, " +
+               "dans un contexte de marché qui n'a plus rien à voir.")
 
 gP = "Figures"
 useDouble = input.bool(true, "Double Top / Double Bottom", group = gP)
@@ -89,29 +99,40 @@ gHi(int i) => array.get(pIsHi,  array.size(pIsHi)  - 1 - i)
 // ta.crossunder) doivent être évalués à CHAQUE bougie pour garder un état
 // correct — ils sont donc placés hors des blocs conditionnels.
 
-var bool  dbOn   = false
-var float dbNeck = na
-var float dbStop = na
-var float dbTgt  = na
-var int   dbFrom = na
+// xxInval : niveau dont le franchissement détruit la figure (le prix est passé
+//           du mauvais côté du point extrême, il n'y a plus de retournement à
+//           attendre). xxArm : bougie d'armement, pour l'expiration.
+var bool  dbOn    = false
+var float dbNeck  = na
+var float dbStop  = na
+var float dbTgt   = na
+var int   dbFrom  = na
+var float dbInval = na
+var int   dbArm   = na
 
-var bool  dtOn   = false
-var float dtNeck = na
-var float dtStop = na
-var float dtTgt  = na
-var int   dtFrom = na
+var bool  dtOn    = false
+var float dtNeck  = na
+var float dtStop  = na
+var float dtTgt   = na
+var int   dtFrom  = na
+var float dtInval = na
+var int   dtArm   = na
 
-var bool  ihOn   = false
-var float ihNeck = na
-var float ihStop = na
-var float ihTgt  = na
-var int   ihFrom = na
+var bool  ihOn    = false
+var float ihNeck  = na
+var float ihStop  = na
+var float ihTgt   = na
+var int   ihFrom  = na
+var float ihInval = na
+var int   ihArm   = na
 
-var bool  hsOn   = false
-var float hsNeck = na
-var float hsStop = na
-var float hsTgt  = na
-var int   hsFrom = na
+var bool  hsOn    = false
+var float hsNeck  = na
+var float hsStop  = na
+var float hsTgt   = na
+var int   hsFrom  = na
+var float hsInval = na
+var int   hsArm   = na
 
 // ── Double Bottom : creux, sommet, creux ─────────────────────────────────────
 if useDouble and newPivot and array.size(pPrice) >= 3
@@ -119,14 +140,18 @@ if useDouble and newPivot and array.size(pPrice) >= 3
         lo2 = gPx(2)
         nk  = gPx(1)
         lo0 = gPx(0)
-        // Les deux creux au même niveau, et un sommet franc entre les deux.
-        if math.abs(lo2 - lo0) <= tol and nk - math.max(lo2, lo0) > tol
-            base   = math.min(lo2, lo0)
-            dbOn   := true
-            dbNeck := nk
-            dbStop := base - atrV * slBuf
-            dbTgt  := nk + (nk - base)
-            dbFrom := gBr(2)
+        // Les deux creux au même niveau, un sommet franc entre les deux, et le
+        // prix encore SOUS la neckline — sinon la cassure a déjà eu lieu et
+        // armer maintenant produirait un signal immédiat et faux.
+        if math.abs(lo2 - lo0) <= tol and nk - math.max(lo2, lo0) > tol and close < nk
+            base    = math.min(lo2, lo0)
+            dbOn    := true
+            dbNeck  := nk
+            dbStop  := base - atrV * slBuf
+            dbTgt   := nk + (nk - base)
+            dbFrom  := gBr(2)
+            dbInval := base
+            dbArm   := bar_index
 
 // ── Double Top : sommet, creux, sommet ───────────────────────────────────────
 if useDouble and newPivot and array.size(pPrice) >= 3
@@ -134,13 +159,15 @@ if useDouble and newPivot and array.size(pPrice) >= 3
         hi2 = gPx(2)
         nk  = gPx(1)
         hi0 = gPx(0)
-        if math.abs(hi2 - hi0) <= tol and math.min(hi2, hi0) - nk > tol
-            peak   = math.max(hi2, hi0)
-            dtOn   := true
-            dtNeck := nk
-            dtStop := peak + atrV * slBuf
-            dtTgt  := nk - (peak - nk)
-            dtFrom := gBr(2)
+        if math.abs(hi2 - hi0) <= tol and math.min(hi2, hi0) - nk > tol and close > nk
+            peak    = math.max(hi2, hi0)
+            dtOn    := true
+            dtNeck  := nk
+            dtStop  := peak + atrV * slBuf
+            dtTgt   := nk - (peak - nk)
+            dtFrom  := gBr(2)
+            dtInval := peak
+            dtArm   := bar_index
 
 // ── Inverted Head & Shoulders : creux, sommet, creux(tête), sommet, creux ────
 if useHS and newPivot and array.size(pPrice) >= 5
@@ -151,13 +178,15 @@ if useHS and newPivot and array.size(pPrice) >= 5
         t2 = gPx(1)
         rs = gPx(0)
         // Tête nettement plus basse que les épaules, épaules à peu près au même niveau.
-        if math.min(ls, rs) - hd > tol and math.abs(ls - rs) <= tol
-            nk     = math.avg(t1, t2)
-            ihOn   := true
-            ihNeck := nk
-            ihStop := hd - atrV * slBuf
-            ihTgt  := nk + (nk - hd)
-            ihFrom := gBr(4)
+        nkI = math.avg(t1, t2)
+        if math.min(ls, rs) - hd > tol and math.abs(ls - rs) <= tol and close < nkI
+            ihOn    := true
+            ihNeck  := nkI
+            ihStop  := hd - atrV * slBuf
+            ihTgt   := nkI + (nkI - hd)
+            ihFrom  := gBr(4)
+            ihInval := hd
+            ihArm   := bar_index
 
 // ── Head & Shoulders : sommet, creux, sommet(tête), creux, sommet ────────────
 if useHS and newPivot and array.size(pPrice) >= 5
@@ -167,21 +196,37 @@ if useHS and newPivot and array.size(pPrice) >= 5
         hd = gPx(2)
         t2 = gPx(1)
         rs = gPx(0)
-        if hd - math.max(ls, rs) > tol and math.abs(ls - rs) <= tol
-            nk     = math.avg(t1, t2)
-            hsOn   := true
-            hsNeck := nk
-            hsStop := hd + atrV * slBuf
-            hsTgt  := nk - (hd - nk)
-            hsFrom := gBr(4)
+        nkH = math.avg(t1, t2)
+        if hd - math.max(ls, rs) > tol and math.abs(ls - rs) <= tol and close > nkH
+            hsOn    := true
+            hsNeck  := nkH
+            hsStop  := hd + atrV * slBuf
+            hsTgt   := nkH - (hd - nkH)
+            hsFrom  := gBr(4)
+            hsInval := hd
+            hsArm   := bar_index
+
+// ═══ Garde-fous : expiration et invalidation ═════════════════════════════════
+// Une figure armée n'attend pas indéfiniment. Elle est abandonnée si le prix
+// franchit son point extrême — la figure est alors détruite, il n'y a plus de
+// retournement à espérer — ou si la neckline n'a pas cédé après maxWait bougies.
+if dbOn and (low  < dbInval or bar_index - dbArm > maxWait)
+    dbOn := false
+if dtOn and (high > dtInval or bar_index - dtArm > maxWait)
+    dtOn := false
+if ihOn and (low  < ihInval or bar_index - ihArm > maxWait)
+    ihOn := false
+if hsOn and (high > hsInval or bar_index - hsArm > maxWait)
+    hsOn := false
 
 // ═══ Confirmation : cassure de la neckline ═══════════════════════════════════
-// Évalué sur chaque bougie, sans condition, pour que l'état des croisements
-// reste juste.
-dbBreak = dbOn and ta.crossover(close,  dbNeck)
-dtBreak = dtOn and ta.crossunder(close, dtNeck)
-ihBreak = ihOn and ta.crossover(close,  ihNeck)
-hsBreak = hsOn and ta.crossunder(close, hsNeck)
+// Les appels ta.crossover / ta.crossunder sont évalués sur CHAQUE bougie, sans
+// condition, pour que leur état interne reste juste. La cassure doit survenir
+// strictement après la bougie d'armement.
+dbBreak = dbOn and bar_index > dbArm and ta.crossover(close,  dbNeck)
+dtBreak = dtOn and bar_index > dtArm and ta.crossunder(close, dtNeck)
+ihBreak = ihOn and bar_index > ihArm and ta.crossover(close,  ihNeck)
+hsBreak = hsOn and bar_index > hsArm and ta.crossunder(close, hsNeck)
 
 // ═══ Tracé ═══════════════════════════════════════════════════════════════════
 draw(string name, int fromBar, float neck, float stopLvl, float tgt, color c, bool up) =>
