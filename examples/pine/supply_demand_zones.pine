@@ -1,0 +1,193 @@
+//@version=6
+// ============================================================================
+//  SUPPLY & DEMAND ZONES [Claude]
+//  Zones d'offre / demande basees sur les regles de "The Ultimate Supply and
+//  Demand Trading Guide" (B. Kenny), reformulees en criteres mesurables.
+//
+//  Detection (base + impulsion) :
+//    - BASE       : 2..6 bougies calmes consecutives (corps et range petits vs ATR)
+//    - IMPULSION  : bougie a gros corps qui sort de la base
+//        impulsion haussiere -> zone de DEMANDE  (RCR ou DCR)
+//        impulsion baissiere -> zone d'OFFRE     (RCD ou DCD)
+//    - Trace de la zone
+//        Demande : plus bas de meche  -> plus haut de corps de la base
+//        Offre   : plus haut de meche -> plus bas de corps de la base
+//
+//  Score de credibilite (0-3 etoiles) = 3 lois du livre :
+//    Temps      : base d'au moins N bougies
+//    Force      : impulsion >= X * ATR
+//    Fraicheur  : zone jamais retestee
+//
+//  Vie de la zone : retests comptes, zone supprimee si cloture au-dela du
+//  cote oppose ou si trop de retests (absorption d'ordres).
+//
+//  Signaux : confirmation price action DANS la zone (engulfing ou pin bar).
+//  Le livre place le stop hors de la zone et le take profit avant la zone opposee.
+//
+//  Les seuils (ATR, nb de bougies) ne sont PAS dans le livre : ce sont des
+//  choix de parametrage, a ajuster par actif / unite de temps.
+//  Unites de temps conseillees par le livre : Daily et H4.
+// ============================================================================
+indicator("Supply & Demand Zones [Claude]", "S&D Zones", overlay = true,
+     max_boxes_count = 200, max_labels_count = 100)
+
+// ---------------------------------------------------------------- Inputs ---
+grpDet = "Detection"
+atrLen      = input.int(14, "Longueur ATR", minval = 1, group = grpDet)
+minBase     = input.int(2, "Base : bougies minimum", minval = 1, group = grpDet)
+maxBase     = input.int(6, "Base : bougies maximum", minval = 1, group = grpDet)
+baseBodyMax = input.float(0.6, "Base : corps max (x ATR)", minval = 0.1, step = 0.1, group = grpDet)
+baseRngMax  = input.float(1.2, "Base : range max (x ATR)", minval = 0.1, step = 0.1, group = grpDet)
+impMult     = input.float(1.5, "Impulsion : corps min (x ATR)", minval = 0.5, step = 0.1, group = grpDet)
+priorLen    = input.int(5, "Jambe precedente (bougies) pour RCR/DCR/RCD/DCD", minval = 1, group = grpDet)
+
+grpScore = "Score de credibilite"
+timeBars   = input.int(3, "Temps : base >= N bougies", minval = 1, group = grpScore)
+strongMult = input.float(2.5, "Force : impulsion >= X * ATR", minval = 1.0, step = 0.1, group = grpScore)
+
+grpLife = "Vie des zones"
+maxRetests = input.int(3, "Retests max avant suppression", minval = 0, group = grpLife)
+maxZones   = input.int(8, "Zones max par cote", minval = 1, maxval = 50, group = grpLife)
+minScore   = input.int(1, "Score minimum affiche", minval = 1, maxval = 3, group = grpLife)
+onlyFresh  = input.bool(false, "Signaux uniquement sur zones fraiches", group = grpLife)
+
+grpSig = "Signaux"
+showSig  = input.bool(true, "Afficher les signaux de confirmation", group = grpSig)
+pinRatio = input.float(2.0, "Pin bar : meche >= X * corps", minval = 1.0, step = 0.5, group = grpSig)
+
+grpVis = "Style"
+demandCol = input.color(color.new(#26a69a, 80), "Demande (fond)", group = grpVis)
+supplyCol = input.color(color.new(#ef5350, 80), "Offre (fond)", group = grpVis)
+showText  = input.bool(true, "Texte dans la zone", group = grpVis)
+
+// ----------------------------------------------------------------- Types ---
+type Zone
+    box    bx
+    bool   isDemand
+    float  top
+    float  bot
+    int    retests
+    bool   inside
+    int    baseLen
+    bool   strong
+
+// ----------------------------------------------------------------- State ---
+var array<Zone> zones = array.new<Zone>()
+atrV = ta.atr(atrLen)
+
+stars(int n) =>
+    n >= 3 ? "★★★" : n == 2 ? "★★" : "★"
+
+scoreOf(Zone z) =>
+    (z.baseLen >= timeBars ? 1 : 0) + (z.strong ? 1 : 0) + (z.retests == 0 ? 1 : 0)
+
+zoneText(Zone z, string kind) =>
+    (z.isDemand ? "D " : "S ") + kind + " " + stars(scoreOf(z)) + (z.retests > 0 ? " r" + str.tostring(z.retests) : "")
+
+bool longSig  = false
+bool shortSig = false
+
+// ---------------------------------------------- 1) Mise a jour des zones ---
+// Avant la creation : la bougie d'impulsion ne doit pas compter comme retest.
+bullEngulf = close > open and close[1] < open[1] and close >= open[1] and open <= close[1]
+bearEngulf = close < open and close[1] > open[1] and close <= open[1] and open >= close[1]
+bodyAbs    = math.abs(close - open)
+lowWick    = math.min(open, close) - low
+upWick     = high - math.max(open, close)
+bullPin    = lowWick >= pinRatio * math.max(bodyAbs, syminfo.mintick) and close > (high + low) / 2
+bearPin    = upWick >= pinRatio * math.max(bodyAbs, syminfo.mintick) and close < (high + low) / 2
+
+if zones.size() > 0
+    for i = zones.size() - 1 to 0
+        Zone z = zones.get(i)
+        bool touch = low <= z.top and high >= z.bot
+        if touch and not z.inside
+            z.retests += 1
+        z.inside := touch
+        bool broken = z.isDemand ? close < z.bot : close > z.top
+        if broken or z.retests > maxRetests
+            box.delete(z.bx)
+            zones.remove(i)
+        else
+            box.set_right(z.bx, bar_index)
+            if showText
+                box.set_text(z.bx, zoneText(z, ""))
+            if touch and showSig and (not onlyFresh or z.retests <= 1)
+                if z.isDemand and (bullEngulf or bullPin)
+                    longSig := true
+                if not z.isDemand and (bearEngulf or bearPin)
+                    shortSig := true
+
+// ------------------------------------------------ 2) Detection de zones ---
+// Comptage des bougies de base juste avant la bougie courante (impulsion).
+int   k       = 0
+float bHigh   = na
+float bLow    = na
+float bBodyHi = na
+float bBodyLo = na
+for j = 1 to maxBase
+    bool calm = math.abs(close[j] - open[j]) <= baseBodyMax * atrV[j] and (high[j] - low[j]) <= baseRngMax * atrV[j]
+    if not calm
+        break
+    k += 1
+    bHigh   := na(bHigh) ? high[j] : math.max(bHigh, high[j])
+    bLow    := na(bLow) ? low[j] : math.min(bLow, low[j])
+    bBodyHi := na(bBodyHi) ? math.max(open[j], close[j]) : math.max(bBodyHi, math.max(open[j], close[j]))
+    bBodyLo := na(bBodyLo) ? math.min(open[j], close[j]) : math.min(bBodyLo, math.min(open[j], close[j]))
+
+atrPrev   = nz(atrV[1], atrV)
+impBull   = close > open and bodyAbs >= impMult * atrPrev
+impBear   = close < open and bodyAbs >= impMult * atrPrev
+newDemand = k >= minBase and impBull and close > bHigh
+newSupply = k >= minBase and impBear and close < bLow
+
+overlaps(bool demand, float t, float b) =>
+    bool hit = false
+    for z in zones
+        if z.isDemand == demand and t >= z.bot and b <= z.top
+            hit := true
+    hit
+
+countSide(bool demand) =>
+    int c = 0
+    for z in zones
+        if z.isDemand == demand
+            c += 1
+    c
+
+dropOldest(bool demand) =>
+    for i = 0 to zones.size() - 1
+        Zone z = zones.get(i)
+        if z.isDemand == demand
+            box.delete(z.bx)
+            zones.remove(i)
+            break
+
+if newDemand or newSupply
+    bool dem = newDemand
+    float zTop = dem ? bBodyHi : bHigh
+    float zBot = dem ? bLow : bBodyLo
+    // Jambe avant la base : detecte retournement (R) ou continuation (C)
+    float priorMove = nz(close[k + 1] - close[k + 1 + priorLen], 0.0)
+    string kind = dem ? (priorMove < 0 ? "DCR" : "RCR") : (priorMove > 0 ? "RCD" : "DCD")
+    Zone nz_ = Zone.new(na, dem, zTop, zBot, 0, false, k, bodyAbs >= strongMult * atrPrev)
+    if scoreOf(nz_) >= minScore and not overlaps(dem, zTop, zBot)
+        if countSide(dem) >= maxZones
+            dropOldest(dem)
+        nz_.bx := box.new(bar_index - k, zTop, bar_index, zBot,
+             border_color = dem ? color.new(#26a69a, 30) : color.new(#ef5350, 30),
+             bgcolor = dem ? demandCol : supplyCol,
+             text = showText ? zoneText(nz_, kind) : "",
+             text_size = size.small,
+             text_color = dem ? #26a69a : #ef5350,
+             text_halign = text.align_right)
+        zones.push(nz_)
+
+// ---------------------------------------------------------------- Signaux ---
+plotshape(longSig, "Confirmation achat", shape.triangleup, location.belowbar,
+     color = #26a69a, size = size.small, text = "BUY")
+plotshape(shortSig, "Confirmation vente", shape.triangledown, location.abovebar,
+     color = #ef5350, size = size.small, text = "SELL")
+
+alertcondition(longSig, "Confirmation dans zone de demande", "Confirmation haussiere dans une zone de demande")
+alertcondition(shortSig, "Confirmation dans zone d'offre", "Confirmation baissiere dans une zone d'offre")
