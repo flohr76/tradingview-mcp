@@ -184,6 +184,8 @@ if newDemand or newSupply
         zones.push(nz_)
 
 // ---------------------------------------------------------------- Signaux ---
+// Trace neutre garantissant au moins un plot() de haut niveau (exige par CE10246).
+plot(na, "S&D", display = display.none)
 plotshape(longSig, "Confirmation achat", shape.triangleup, location.belowbar,
      color = #26a69a, size = size.small, text = "BUY")
 plotshape(shortSig, "Confirmation vente", shape.triangledown, location.abovebar,
