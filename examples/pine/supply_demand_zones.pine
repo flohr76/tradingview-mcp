@@ -69,23 +69,25 @@ bool longSig = false
 bool shortSig = false
 
 // 1) Mise a jour des zones existantes (avant creation : l'impulsion n'est pas un retest)
-for i = zBox.size() - 1 to 0
-    bool dem = zDem.get(i)
-    bool touch = low <= zTop.get(i) and high >= zBot.get(i)
-    if touch and not zIn.get(i)
-        zRet.set(i, zRet.get(i) + 1)
-    zIn.set(i, touch)
-    bool broken = dem ? close < zBot.get(i) : close > zTop.get(i)
-    if broken or zRet.get(i) > maxRetests
-        zRemove(i)
+int u = zBox.size() - 1
+while u >= 0
+    bool dem = zDem.get(u)
+    bool touch = low <= zTop.get(u) and high >= zBot.get(u)
+    if touch and not zIn.get(u)
+        zRet.set(u, zRet.get(u) + 1)
+    zIn.set(u, touch)
+    bool broken = dem ? close < zBot.get(u) : close > zTop.get(u)
+    if broken or zRet.get(u) > maxRetests
+        zRemove(u)
     else
-        box.set_right(zBox.get(i), bar_index)
-        box.set_text(zBox.get(i), zText(i))
-        if touch and (not onlyFresh or zRet.get(i) <= 1)
+        box.set_right(zBox.get(u), bar_index)
+        box.set_text(zBox.get(u), zText(u))
+        if touch and (not onlyFresh or zRet.get(u) <= 1)
             if dem and (bullEngulf or bullPin)
                 longSig := true
             if not dem and (bearEngulf or bearPin)
                 shortSig := true
+    u -= 1
 
 // 2) Detection : bougies de base juste avant la bougie courante (= impulsion)
 int k = 0
@@ -118,13 +120,15 @@ if newDemand or newSupply
     bool overlap = false
     int sideCount = 0
     int oldest = -1
-    for i = 0 to zBox.size() - 1
-        if zDem.get(i) == isD
+    int w = 0
+    while w < zBox.size()
+        if zDem.get(w) == isD
             sideCount += 1
             if oldest < 0
-                oldest := i
-            if top >= zBot.get(i) and bot <= zTop.get(i)
+                oldest := w
+            if top >= zBot.get(w) and bot <= zTop.get(w)
                 overlap := true
+        w += 1
     if score >= minScore and not overlap
         if sideCount >= maxZones
             zRemove(oldest)
